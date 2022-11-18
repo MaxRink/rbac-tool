@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/kylelemons/godebug/pretty"
@@ -18,6 +19,40 @@ import (
 	"github.com/alcideio/rbac-tool/pkg/kube"
 )
 
+func unique(rawRBAC []rbacv1.PolicyRule) []rbacv1.PolicyRule {
+	var unique []rbacv1.PolicyRule
+loopRBAC:
+	for _, v := range rawRBAC {
+		for i, u := range unique {
+			if reflect.DeepEqual(v.APIGroups, u.APIGroups) && reflect.DeepEqual(v.Verbs, u.Verbs) && reflect.DeepEqual(v.Resources, u.Resources) {
+				unique[i] = v
+				continue loopRBAC
+			}
+		}
+		unique = append(unique, v)
+	}
+	return unique
+}
+
+func groupPolicyRules(policyRules []rbacv1.PolicyRule) []rbacv1.PolicyRule {
+	set := make(map[string]rbacv1.PolicyRule) // New empty set
+	for _, s := range policyRules {
+		if _, found := set[strings.Join(s.APIGroups, "")+strings.Join(s.Verbs, "")]; found {
+			tmp := set[strings.Join(s.APIGroups, "")+strings.Join(s.Verbs, "")]
+			tmp.Resources = append(tmp.Resources, s.Resources...)
+			set[strings.Join(s.APIGroups, "")+strings.Join(s.Verbs, "")] = tmp
+		} else {
+			set[strings.Join(s.APIGroups, "")+strings.Join(s.Verbs, "")] = s
+
+		}
+	}
+	// flatten map back to slice
+	groupedPolicyRules := make([]rbacv1.PolicyRule, 0)
+	for _, s := range set {
+		groupedPolicyRules = append(groupedPolicyRules, s)
+	}
+	return groupedPolicyRules
+}
 func NewCommandGenerateShowPermissions() *cobra.Command {
 
 	clusterContext := ""
@@ -27,6 +62,7 @@ func NewCommandGenerateShowPermissions() *cobra.Command {
 	scope := "cluster"
 	denyVerb := []string{}
 	denyResource := []string{}
+	groupResources := false
 
 	// Support overrides
 	cmd := &cobra.Command{
@@ -75,7 +111,7 @@ rbac-tool show  --for-groups=,apps
 
 			klog.V(7).Infof(">>>>> All Resources \n%v\n>>>>>", pretty.Sprint(allResources))
 
-			computedPolicyRules, err := generateRulesWithSubResources(allResources, scope, preferredApiGroups, sets.NewString(denyResource...), sets.NewString(forGroups...), sets.NewString(withVerb...), sets.NewString(denyVerb...))
+			computedPolicyRules, err := generateRulesWithSubResources(allResources, scope, preferredApiGroups, sets.NewString(denyResource...), sets.NewString(forGroups...), sets.NewString(withVerb...), sets.NewString(denyVerb...), groupResources)
 			if err != nil {
 				return err
 			}
@@ -101,12 +137,13 @@ rbac-tool show  --for-groups=,apps
 	flags.StringSliceVar(&forGroups, "for-groups", []string{"*"}, "Comma separated list of API groups we would like to show the permissions")
 	flags.StringSliceVar(&withVerb, "with-verbs", []string{"*"}, "Comma separated list of verbs to include. To include all use '*'")
 	flags.StringSliceVar(&denyVerb, "without-verbs", []string{""}, "Comma separated list of verbs to exclude.")
-	flags.StringSliceVar(&denyResource, "without-resources", []string{""}, "Comma separated list of resources to exclude. Syntax: <resourceName>.<apiGroup>")
+	flags.StringSliceVar(&denyResource, "without-resources", []string{""}, "Comma separated list of resources to exclude.")
+	flags.BoolVar(&groupResources, "group-resources", false, "Enable grouping of resources with the same ApiGroup and verbs")
 
 	return cmd
 }
 
-func generateRulesWithSubResources(apiresourceList []*metav1.APIResourceList, scope string, preferredApiGroups sets.String, denyResources sets.String, includeGroups sets.String, allowedVerbs sets.String, deniedVerbs sets.String) ([]rbacv1.PolicyRule, error) {
+func generateRulesWithSubResources(apiresourceList []*metav1.APIResourceList, scope string, preferredApiGroups sets.String, denyResources sets.String, includeGroups sets.String, allowedVerbs sets.String, deniedVerbs sets.String, groupResources bool) ([]rbacv1.PolicyRule, error) {
 	errs := []error{}
 
 	computedPolicyRules := make([]rbacv1.PolicyRule, 0)
@@ -189,6 +226,10 @@ func generateRulesWithSubResources(apiresourceList []*metav1.APIResourceList, sc
 			}
 
 		}
+	}
+	// computedPolicyRules = unique(computedPolicyRules)
+	if groupResources {
+		computedPolicyRules = groupPolicyRules(computedPolicyRules)
 	}
 
 	return computedPolicyRules, errors.NewAggregate(errs)
